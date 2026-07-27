@@ -1,0 +1,21 @@
+# Render blueprint — weekly URL health watch, no credentials required.
+#
+# A CRON JOB, not a background worker: this runs for ~30 seconds once a week, so a
+# always-on worker would bill 24/7 to do nothing 99.99% of the time.
+#
+# ALERTING WITH NO SECRETS: watch.mjs exits non-zero when a site is broken, and
+# Render emails the account on a failed cron run. No token, no webhook, no inbox
+# integration to rot.
+services:
+  - type: cron
+    name: site-index-watch
+    runtime: node
+    plan: starter
+    region: singapore          # closest to the HK audience and to the hosts being probed
+    schedule: "17 0 * * 1"     # Mondays 00:17 UTC = 08:17 HKT. Off-the-hour on purpose:
+                               # :00 is where every scheduler on earth piles up.
+    buildCommand: npm ci --omit=dev || true
+    startCommand: node watch.mjs
+    envVars:
+      - key: WATCH_SITES
+        value: https://smallclaims.com.hk,https://landlord.com.hk

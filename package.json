@@ -1,0 +1,8 @@
+{
+  "name": "site-index-watch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node watch.mjs" }
+}
