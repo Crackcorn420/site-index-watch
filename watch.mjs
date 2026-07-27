@@ -1,29 +1,25 @@
 #!/usr/bin/env node
 /**
- * watch.mjs — always-on URL health watch. Runs anywhere, needs NO credentials.
+ * watch.mjs — always-on URL health watch. No credentials, no local machine.
  *
- * WHY THIS EXISTS: on 2026-07-27 the owner opened Google Search Console, saw "57
- * pages not indexed", and asked about it. The cause had been live for weeks.
- * A watch was built the same day — but as a Windows Scheduled Task, so it only ran
- * when that one PC happened to be on AND logged in. A monitor whose uptime depends
- * on a laptop lid is a monitor you cannot trust to catch the next one.
+ * ASSERTS THE DECLARED-URL LAW: every URL a site declares in its sitemap must be
+ * byte-identical to the URL the host actually serves. A declared URL that redirects
+ * is filed by Google as "Page with redirect — not indexed", and any hreflang
+ * alternate pointing at it is DISCARDED — silently unlinking a whole locale cluster.
  *
- * THE SPLIT THAT MAKES THIS POSSIBLE: the original watch had two lenses. The Google
- * lens needs the service-account key (vault-bound, therefore PC-bound). The LIVE
- * lens needs nothing but internet — and the live lens is the one that found
- * everything: 89 of 90 broken URLs on landlord.com.hk and all three infinite
- * redirect loops. So the valuable half runs free, in the cloud, with no secrets.
+ * Static hosts normalise silently and differently: some lowercase paths, some append
+ * a trailing slash, some do both. When a redirect rule then fights that
+ * normalisation, the two can bounce forever and the page becomes permanently
+ * unreachable to users AND crawlers while every other check still reports green.
+ * Those three failure kinds — LOOP, DEAD, REDIRECTING — are what this reports.
  *
- * WHAT IT ASSERTS — the declared-URL law: every URL a site DECLARES in its sitemap
- * must be byte-identical to the URL the host actually SERVES. A declared URL that
- * redirects is filed by Google as "Page with redirect — not indexed", and any
- * hreflang alternate pointing at it is DISCARDED.
+ * Deliberately credential-free: it needs nothing but internet, so it can run
+ * anywhere on a schedule instead of on one person's machine.
  *
- * HOW IT REPORTS, with no extra secrets: it exits NON-ZERO when a site is broken.
- * Render emails the account on a failed cron run, so the alarm needs no token, no
- * webhook and no inbox integration. Findings are printed to the run log.
+ * Alerting with no secrets: exits NON-ZERO when a site is broken. A cron host that
+ * emails on failed runs is then the entire alerting stack — no token, no webhook.
  *
- * Config: WATCH_SITES = comma-separated origins. Nothing else.
+ * Config: WATCH_SITES = comma-separated origins. That is all.
  */
 
 const SITES = (process.env.WATCH_SITES || "")
@@ -84,7 +80,7 @@ async function expand(url, depth = 0, seen = new Set()) {
 /**
  * Follow redirects MANUALLY. `redirect: "follow"` throws an opaque error on a loop,
  * and `curl -L` hides one by following until it gives up — both of which is how three
- * permanently-dead pages sat unnoticed on landlord.com.hk. We need the chain so the
+ * permanently-dead pages can sit unnoticed for weeks. We need the chain so the
  * two URLs that bounce can be NAMED in the alert.
  */
 async function check(url, maxHops = 8) {

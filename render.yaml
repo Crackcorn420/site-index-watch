@@ -18,4 +18,4 @@ services:
     startCommand: node watch.mjs
     envVars:
       - key: WATCH_SITES
-        value: https://smallclaims.com.hk,https://landlord.com.hk
+        sync: false          # set per-deployment; never commit the site list
