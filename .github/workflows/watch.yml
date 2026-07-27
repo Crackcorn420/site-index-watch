@@ -8,11 +8,14 @@
 name: site-index-watch
 
 on:
-  schedule:
-    # Mondays 00:17 UTC = 08:17 Hong Kong. Off-the-hour on purpose: :00 is where every
-    # scheduler on earth piles up, and GitHub delays cron under load at those peaks.
-    - cron: "17 0 * * 1"
-  workflow_dispatch:        # so it can be run on demand without waiting a week
+  # SCHEDULE REMOVED 2026-07-27: the weekly run moved to Render (paid plan, Singapore,
+  # both lenses including the Google one, which needs a credential Actions should not
+  # hold). Two schedulers running the same check would double every alert email, and an
+  # alert people learn to ignore is the same as no alert.
+  #
+  # Kept as manual-dispatch so this stays a working, credential-free second opinion —
+  # useful precisely when the paid path is the thing that is broken.
+  workflow_dispatch:
 
 permissions:
   contents: read
