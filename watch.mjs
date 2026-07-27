@@ -142,5 +142,29 @@ for (const origin of SITES) {
   show("REDIRECTING", reds, 'Google files these as "Page with redirect, not indexed" and DISCARDS hreflang pointing at them');
 }
 
+// ── Google lens (optional; skips cleanly when no credential is present) ──────
+// Separate module so the credential-free watch above still runs on any host, even
+// one with no secret store at all.
+try {
+  const { gscLens } = await import("./gsc.mjs");
+  const g = await gscLens(SITES);
+  console.log("");
+  if (g.skipped) console.log(`google lens: ${g.skipped}`);
+  else if (g.error) { console.error(`google lens: ${g.error}`); worst = 1; }
+  else {
+    for (const l of g.lines || []) console.log(`google: ${l}`);
+    for (const f of g.findings || []) { console.error(`  ✗ ${f}`); worst = 1; }
+  }
+} catch (e) {
+  // A crashed lens must never read as a clean bill of health.
+  console.error(`google lens crashed: ${e.message}`);
+  worst = 1;
+}
+
 console.log(`\nverdict: ${worst ? "BROKEN — see above" : "all clean"}`);
-process.exit(worst);
+
+// Deterministic exit is the entire alert signal, so it must not depend on teardown.
+// (On Windows + Node 24 this can abort in the platform-specific libuv path with
+// sockets still closing, replacing the verdict with 127. The program prints
+// correctly first, and the host that matters here is Linux.)
+process.exitCode = worst;

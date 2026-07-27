@@ -39,9 +39,25 @@ then the whole alerting stack — no token, no webhook, nothing to rot.
 - Empty `WATCH_SITES` **aborts** — a watch with nothing to watch reports green forever.
 - A site with zero discoverable sitemap URLs is a **finding**, not a silence.
 
+## Two lenses
+
+| lens | needs | catches |
+|---|---|---|
+| **live** (`watch.mjs`) | nothing but internet | breakage the week it ships — loops, dead URLs, redirects |
+| **google** (`gsc.mjs`) | `GOOGLE_SA_JSON` | lagging ground truth: pages Google *ranks* that now answer 4xx |
+
+The Google lens **skips cleanly** when no credential is present, so the credential-free
+watch runs on any host. A crashed lens is reported as a failure, never as a clean bill.
+
+The Google lens deliberately asks a question the coverage report cannot answer: *which
+pages does Google have search data for, and does each still resolve?* That is how live
+404s on ranking URLs get found without any dashboard export.
+
 ## Config
 
-`WATCH_SITES` — comma-separated origins. That is the entire configuration.
+`WATCH_SITES` — comma-separated origins. Required.
+`GOOGLE_SA_JSON` — service-account JSON. Optional; enables the Google lens. Never
+committed and never typed into a dashboard — pushed from the vault by API.
 Sitemap location is read from each site's `robots.txt`, never guessed.
 
 ```bash
