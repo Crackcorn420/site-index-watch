@@ -107,6 +107,12 @@ async function check(url, maxHops = 8) {
 }
 
 let worst = 0;
+// Structured mirror of everything printed below. Emitted as one JSON line at the
+// end so a consumer never has to scrape the human prose — see the note by
+// SITE_INDEX_WATCH_JSON at the bottom of this file.
+const sites = [];
+const googleLines = [];
+const findings = [];
 const stamp = new Date().toISOString();
 console.log(`site-index-watch — ${stamp}`);
 console.log(`watching ${SITES.length} site(s): ${SITES.join(", ")}\n`);
@@ -119,6 +125,8 @@ for (const origin of SITES) {
     // Zero URLs must never read as healthy — that is indistinguishable from a clean site.
     console.error(`✗ ${origin}: NO sitemap URLs discoverable (tried ${sitemaps.join(", ")}). Google is being handed nothing.`);
     worst = 1;
+    sites.push({ origin, total: 0, ok: 0, redirecting: 0, dead: 0, loops: 0, error: "no sitemap URLs discoverable" });
+    findings.push(`${origin}: NO sitemap URLs discoverable`);
     continue;
   }
 
@@ -129,10 +137,19 @@ for (const origin of SITES) {
   const ok = res.filter((r) => r.kind === "ok");
 
   console.log(`${origin}: ${ok.length}/${urls.length} clean · ${reds.length} redirecting · ${dead.length} dead · ${loops.length} LOOPS`);
+  sites.push({
+    origin,
+    total: urls.length,
+    ok: ok.length,
+    redirecting: reds.length,
+    dead: dead.length,
+    loops: loops.length,
+  });
 
   const show = (label, rows, note) => {
     if (!rows.length) return;
     worst = 1;
+    findings.push(`${origin}: ${label} (${rows.length})`);
     console.error(`  ✗ ${label} (${rows.length}) — ${note}`);
     for (const r of rows.slice(0, 8)) console.error(`      ${r.detail || r.url}`);
     if (rows.length > 8) console.error(`      … and ${rows.length - 8} more`);
@@ -149,19 +166,44 @@ try {
   const { gscLens } = await import("./gsc.mjs");
   const g = await gscLens(SITES);
   console.log("");
-  if (g.skipped) console.log(`google lens: ${g.skipped}`);
-  else if (g.error) { console.error(`google lens: ${g.error}`); worst = 1; }
+  if (g.skipped) { console.log(`google lens: ${g.skipped}`); googleLines.push(`skipped: ${g.skipped}`); }
+  else if (g.error) { console.error(`google lens: ${g.error}`); findings.push(`google lens: ${g.error}`); worst = 1; }
   else {
-    for (const l of g.lines || []) console.log(`google: ${l}`);
-    for (const f of g.findings || []) { console.error(`  ✗ ${f}`); worst = 1; }
+    for (const l of g.lines || []) { console.log(`google: ${l}`); googleLines.push(l); }
+    for (const f of g.findings || []) { console.error(`  ✗ ${f}`); findings.push(f); worst = 1; }
   }
 } catch (e) {
   // A crashed lens must never read as a clean bill of health.
   console.error(`google lens crashed: ${e.message}`);
+  findings.push(`google lens crashed: ${e.message}`);
   worst = 1;
 }
 
 console.log(`\nverdict: ${worst ? "BROKEN — see above" : "all clean"}`);
+
+// ── machine-readable mirror ─────────────────────────────────────────────────
+// One line, one JSON object, stable prefix. This exists so the workspace's local
+// state-watchdog can consume this cron's result THROUGH THE RENDER LOG API and
+// the local GSC-IndexWatch scheduled task can be deleted — moving the querying
+// off the owner's PC while the alert it feeds still reaches him.
+//
+// Deliberately NOT scraped from the prose above: parsing human output is how you
+// build the next false alarm. The prose is for people; this line is the contract.
+// If you change a field here, update _ops/scripts/state-watchdog.mjs in the same
+// commit — it is the only consumer.
+console.log(
+  "SITE_INDEX_WATCH_JSON=" +
+    JSON.stringify({
+      v: 1,
+      generatedAt: stamp,
+      ok: worst === 0,
+      sitesRequested: SITES.length,
+      sitesSucceeded: sites.filter((s) => !s.error).length,
+      sites,
+      google: googleLines,
+      findings,
+    }),
+);
 
 // Deterministic exit is the entire alert signal, so it must not depend on teardown.
 // (On Windows + Node 24 this can abort in the platform-specific libuv path with
