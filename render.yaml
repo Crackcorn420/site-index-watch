@@ -6,6 +6,14 @@
 # ALERTING WITH NO SECRETS: watch.mjs exits non-zero when a site is broken, and
 # Render emails the account on a failed cron run. No token, no webhook, no inbox
 # integration to rot.
+#
+# TWO SCRIPTS, ONE RUN (added 2026-07-30): watch.mjs (credential-free live check) runs
+# first, then inspect.mjs (the URL Inspection lens, needs GOOGLE_SA_JSON) runs second —
+# same process tree, same log stream, so inspect.mjs's GSC_WATCH_JSON lines land AFTER
+# watch.mjs's SITE_INDEX_WATCH_JSON line without either script needing to know about the
+# other. `;` (not `&&`) so inspect.mjs still runs even when watch.mjs finds a broken
+# site; the explicit exit-code combine at the end is what still fails the cron run (and
+# triggers Render's failure email) if EITHER script failed.
 services:
   - type: cron
     name: site-index-watch
@@ -15,7 +23,9 @@ services:
     schedule: "17 0 * * 1"     # Mondays 00:17 UTC = 08:17 HKT. Off-the-hour on purpose:
                                # :00 is where every scheduler on earth piles up.
     buildCommand: npm ci --omit=dev || true
-    startCommand: node watch.mjs
+    startCommand: "sh -c 'node watch.mjs; w=$?; node inspect.mjs; i=$?; [ \"$w\" -eq 0 ] && [ \"$i\" -eq 0 ]'"
     envVars:
       - key: WATCH_SITES
         sync: false          # set per-deployment; never commit the site list
+      - key: GOOGLE_SA_JSON
+        sync: false          # service-account JSON for inspect.mjs + gsc.mjs; never committed
