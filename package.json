@@ -4,5 +4,8 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=20" },
-  "scripts": { "start": "node watch.mjs" }
+  "scripts": {
+    "start": "node watch.mjs",
+    "test": "node selftest-inspect-defects.mjs"
+  }
 }

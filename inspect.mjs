@@ -51,6 +51,8 @@
  * former gsc-watch.mjs never used its own exit code to carry findings either.
  */
 import { createHash, createSign } from "node:crypto";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const RUN_ID = new Date().toISOString();
 
@@ -113,14 +115,20 @@ async function getAccessToken(key, scopes) {
 }
 
 // ── property discovery (ported from _ops/scripts/gsc-watch.mjs) ─────────────────────
+// Returns the DISCARDED sc-domain: count alongside the usable properties. Throwing that
+// number away is what let "0 crawlable properties" look identical to "0 properties at
+// all" — see zeroPropertiesReason() below.
 async function listProperties(token) {
   const r = await fetch("https://www.googleapis.com/webmasters/v3/sites", {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!r.ok) throw new Error(`sites list ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  return ((await r.json()).siteEntry || [])
+  const entries = (await r.json()).siteEntry || [];
+  const properties = entries
     .filter((s) => s.siteUrl.startsWith("http")) // skip sc-domain: properties (no URL prefix to crawl)
     .map((s) => ({ siteUrl: s.siteUrl, permission: s.permissionLevel }));
+  const domainOnlyCount = entries.filter((s) => !s.siteUrl.startsWith("http")).length;
+  return { properties, domainOnlyCount };
 }
 
 // ── sitemap discovery: robots.txt is the authority, never a guess ───────────────────
@@ -227,7 +235,75 @@ async function inspectUrl(token, url, property) {
   });
   if (!r.ok) return { url, error: `HTTP ${r.status}` };
   const idx = (await r.json()).inspectionResult?.indexStatusResult || {};
-  return { url, indexed: idx.verdict === "PASS", verdict: idx.verdict || "UNKNOWN" };
+  return {
+    url,
+    indexed: idx.verdict === "PASS",
+    verdict: idx.verdict || "UNKNOWN",
+    coverageState: idx.coverageState || "",
+    lastCrawlTime: idx.lastCrawlTime || "",
+  };
+}
+
+// ── ABSENCE MUST NOT READ AS HEALTH ─────────────────────────────────────────────────
+// Ported from _ops/scripts/gsc-watch.mjs on 2026-07-31. The umbrella's local copy of
+// this lens was hardened on 2026-07-30; this cloud copy — the one that actually runs
+// now — still had all three defects. Vendored rather than imported, matching this
+// file's standing rule that it depends on nothing but the standard library.
+//
+// DEFECT 1. `inspectUrl` returns `{url, error}` instead of throwing, and the caller
+// did `inspected.filter(r => !r.error)` before counting. A property where all 60 calls
+// returned HTTP 403 therefore produced inspected:0 / indexed:0 / notIndexed:0, raised
+// no finding, still incremented sitesSucceeded, and emitted an empty `urlResults` —
+// so the local puller had nothing to compare and also stayed silent. Total failure of
+// the lens rendered as GREEN.
+export const INSPECTION_ERROR_THRESHOLD = 0.5;
+
+export function classifyInspectionBatch(inspected, threshold = INSPECTION_ERROR_THRESHOLD) {
+  const errorRows = inspected.filter((r) => r.error);
+  const notIndexedRows = inspected.filter((r) => !r.error && !r.indexed);
+  const indexedRows = inspected.filter((r) => r.indexed);
+  const errRatio = inspected.length ? errorRows.length / inspected.length : (errorRows.length ? 1 : 0);
+  const unavailable = inspected.length > 0 && errRatio >= threshold;
+  const successfullyInspected = inspected.length - errorRows.length;
+  const notIndexedRatio = successfullyInspected ? notIndexedRows.length / successfullyInspected : 0;
+  return {
+    inspected: inspected.length,
+    indexed: indexedRows.length,
+    notIndexed: notIndexedRows.length,
+    errors: errorRows.length,
+    errRatio,
+    unavailable,
+    successfullyInspected,
+    notIndexedRatio,
+    sampleErrors: [...new Set(errorRows.map((r) => r.error))].slice(0, 3),
+    notIndexedRows,
+    indexedRows,
+    errorRows,
+  };
+}
+
+// DEFECT 2. Zero usable properties left the per-property loop body unexecuted: nothing
+// threw, no finding was appended, jobErrors stayed empty → ok:true, findings:[] →
+// worst GREEN. A service account that had lost its grants, or one that can only see
+// sc-domain: properties (which this sitemap-origin watch cannot crawl), reported
+// perfect health while inspecting nothing at all.
+export function zeroPropertiesReason({ propertiesLength, domainOnlyCount }) {
+  if (propertiesLength) return null;
+  if (domainOnlyCount)
+    return `0 crawlable (http-prefix) properties are visible to this service account, but ${domainOnlyCount} sc-domain: propert${domainOnlyCount === 1 ? "y" : "ies"} exist and are NOT covered by this sitemap-origin watch`;
+  return "0 Search Console properties of any kind are visible to this service account";
+}
+
+// DEFECT 3. Findings rendered as `<url> — <verdict>`, e.g. "https://landlord.com.hk/en
+// — NEUTRAL", which reads as "Google dropped a live page, act now". On 2026-07-27 the
+// truth was the opposite: the verdict had been crawled DURING that day's URL-shape fix
+// and simply had not been re-crawled since. `lastCrawlTime` is the one fact that
+// separates "re-crawled since our fix and still dropped" (act) from "verdict predates
+// our fix" (wait), and the API already returns it. Resolving that ambiguity by hand
+// cost four probes — a finding must be triageable from its own text.
+export function formatIndexRow(r) {
+  const state = r.coverageState || r.verdict || "UNKNOWN";
+  return `${r.url} — ${state} (last crawled ${r.lastCrawlTime || "never"})`;
 }
 
 // ── stateless sampling: no disk, so no cursor. A fixed hash bucket per URL means list
@@ -299,9 +375,9 @@ async function main() {
     return finish({ ok: false, errors: [{ site: "-", message: msg }], sitesRequested: 0, sitesSucceeded: 0, sites, propertyHosts, urlResults });
   }
 
-  let properties;
+  let properties, domainOnlyCount;
   try {
-    properties = await listProperties(token);
+    ({ properties, domainOnlyCount } = await listProperties(token));
   } catch (e) {
     const msg = `cannot list Search Console properties: ${e.message}`;
     note("RED", "-", msg);
@@ -319,7 +395,15 @@ async function main() {
   const jobErrors = [];
   let sitesSucceeded = 0;
 
+  // DEFECT 2 fix — zero properties must never fall through as a silent GREEN.
+  const zeroReason = zeroPropertiesReason({ propertiesLength: properties.length, domainOnlyCount });
+  if (zeroReason) {
+    note("RED", "-", `${zeroReason} — the index watch covered NOTHING this run`);
+    jobErrors.push({ site: "-", message: zeroReason });
+  }
+
   for (const prop of properties) {
+    let inspectionUnavailable = false;
     const origin = prop.siteUrl.replace(/\/$/, "");
     const entry = { property: prop.siteUrl, permission: prop.permission };
     try {
@@ -346,16 +430,44 @@ async function main() {
           const { selected, K, slot } = selectSample(urls);
           entry.sampleNote = `stateless hash-bucket sample: ${selected.length} of ${urls.length} sitemap URLs this run (K=${K}, slot=${slot}); full coverage returns roughly every ${K} run(s) (~${(K * 3.5).toFixed(1)} days)`;
           const inspected = await pool(selected, INSPECT_CONCURRENCY, (u) => inspectUrl(token, u, prop.siteUrl));
-          const clean = inspected.filter((r) => !r.error);
+          const cls = classifyInspectionBatch(inspected);
           entry.gsc = {
-            inspected: clean.length,
-            indexed: clean.filter((r) => r.indexed).length,
-            notIndexed: clean.filter((r) => !r.indexed).length,
+            inspected: cls.inspected,
+            indexed: cls.indexed,
+            notIndexed: cls.notIndexed,
+            errors: cls.errors,
           };
-          for (const r of clean) urlResults.push({ url: r.url, indexed: r.indexed, verdict: r.verdict });
+
+          // DEFECT 1 fix — errored inspections are COUNTED and reported, never filtered
+          // into oblivion. Above the threshold the lens is unavailable for this property
+          // this run: "we could not tell", which is not a successful check.
+          if (cls.errors) {
+            const sampleErrors = cls.sampleErrors.join(", ");
+            if (cls.unavailable) {
+              inspectionUnavailable = true;
+              note("RED", origin, `${cls.errors}/${cls.inspected} URL Inspection calls FAILED (${Math.round(cls.errRatio * 100)}%) — the GSC index-status lens is UNAVAILABLE for this property this run, not clean (${sampleErrors})`);
+              jobErrors.push({ site: prop.siteUrl, message: `URL Inspection failing for ${cls.errors}/${cls.inspected} URLs: ${sampleErrors}` });
+            } else {
+              note("YELLOW", origin, `${cls.errors}/${cls.inspected} URL Inspection calls failed this run — those URLs' index status is UNKNOWN, not "indexed" (${sampleErrors})`);
+            }
+          }
+
+          // Only successfully-inspected rows go on the wire: an errored row has no
+          // verdict, and letting one through as `indexed:false` would make the local
+          // puller's regression comparison read a 403 as "Google dropped this page".
+          // DEFECT 3 fix — coverageState + lastCrawlTime travel with every row so the
+          // puller's findings are triageable without a fresh investigation.
+          for (const r of [...cls.indexedRows, ...cls.notIndexedRows])
+            urlResults.push({
+              url: r.url,
+              indexed: r.indexed,
+              verdict: r.verdict,
+              coverageState: r.coverageState || "",
+              lastCrawlTime: r.lastCrawlTime || "",
+            });
         }
       }
-      sitesSucceeded++;
+      if (!inspectionUnavailable) sitesSucceeded++;
     } catch (error) {
       const message = String(error?.message || error);
       jobErrors.push({ site: prop.siteUrl, message });
@@ -376,4 +488,15 @@ async function main() {
   });
 }
 
-await main();
+// Run only when executed directly. The selftest imports the exported classifiers from
+// this file, and an unguarded top-level `await main()` would fire a live Google run on
+// every `npm test` — the classic "the test suite is the thing that hits production".
+function isDirectRun() {
+  try {
+    return Boolean(process.argv[1]) && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) await main();

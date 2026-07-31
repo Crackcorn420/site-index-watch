@@ -22,8 +22,16 @@ services:
     region: singapore          # closest to the HK audience and to the hosts being probed
     schedule: "17 0 * * 1"     # Mondays 00:17 UTC = 08:17 HKT. Off-the-hour on purpose:
                                # :00 is where every scheduler on earth piles up.
-    buildCommand: npm ci --omit=dev || true
-    startCommand: "sh -c 'node watch.mjs; w=$?; node inspect.mjs; i=$?; [ \"$w\" -eq 0 ] && [ \"$i\" -eq 0 ]'"
+    # ⚠ THIS FILE IS NOT WHAT RUNS. This service was configured in the Render dashboard,
+    # and Render ignores render.yaml for dashboard-configured services — the live build
+    # and start commands come from the API. Verified 2026-07-31 against
+    # GET /v1/services/crn-d9jr3f17lnhs73duulu0; the two lines below are transcribed from
+    # that response so this file stops describing a service that does not exist. Editing
+    # them changes NOTHING at runtime: to change the real command, PATCH the API.
+    # (Before this was corrected the file claimed `npm ci` and a different exit-code
+    # combine than the service actually uses.)
+    buildCommand: npm install --omit=dev || true
+    startCommand: "sh -c 'node watch.mjs; a=$?; node inspect.mjs; b=$?; if [ $a -ne 0 ]; then exit $a; fi; exit $b'"
     envVars:
       - key: WATCH_SITES
         sync: false          # set per-deployment; never commit the site list
