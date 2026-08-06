@@ -10,13 +10,21 @@
  * dashboard; it is pushed from the vault by API. If the variable is absent this
  * lens SKIPS rather than fails, so the credential-free watch still runs anywhere.
  *
- * ACCESS NOTE: URL Inspection requires the service account to be an OWNER or FULL
- * user on the property. Restricted access is enough for Search Analytics but NOT
- * for this — a property we can only partly read is reported as a capability gap,
- * never silently skipped.
+ * ⚠ WHAT THIS FILE ACTUALLY MEASURES (header corrected 2026-08-06). It makes ONE call:
+ * Search Analytics `dimensions:["page"]` over the last 90 days, capped at 500 rows, and
+ * then fetches each returned URL to see whether a page Google RANKS now answers 4xx.
+ * That is the whole surface.
  *
- * QUOTA: 2,000 inspections/day/property. The sample rotates by run so the whole
- * sitemap is covered over successive weeks, and truncation is always REPORTED.
+ * It does NOT call URL Inspection, does NOT rotate a sample, and does NOT cover the
+ * sitemap. The previous header claimed all three ("2,000 inspections/day/property. The
+ * sample rotates by run so the whole sitemap is covered over successive weeks") — that
+ * described `inspect.mjs`, a different file. A header that promises a wider surface than
+ * the code measures is the same defect as a gate that does, because the header is what
+ * the next reader trusts. The permission note it carried belongs to `inspect.mjs` too:
+ * Search Analytics needs only restricted access, which is all this lens requires.
+ *
+ * TRUNCATION AND FAILURE ARE BOTH LOUD. A non-200, a network drop and a full 500-row cap
+ * each push a FINDING. This lens may never report silence it did not earn.
  */
 import { createSign } from "node:crypto";
 
@@ -78,13 +86,43 @@ export async function gscLens(origins) {
     // 404s were found that no coverage export had surfaced.
     const end = new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10);
     const start = new Date(Date.now() - 93 * 864e5).toISOString().slice(0, 10);
-    const sa = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(prop.siteUrl)}/searchAnalytics/query`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ startDate: start, endDate: end, dimensions: ["page"], rowLimit: 500 }),
-    }).then((r) => (r.ok ? r.json() : { rows: [] })).catch(() => ({ rows: [] }));
+    // ⚠ FIXED 2026-08-06 (adversarial sweep, finding 9). This call used to end in
+    //     .then((r) => (r.ok ? r.json() : { rows: [] })).catch(() => ({ rows: [] }))
+    // so a 403, a 429, a 500 or a network drop all became `rows: []`. An empty page list
+    // then made the loop below a no-op, `broken` stayed empty, NO finding was pushed, and
+    // the run printed "verdict: all clean" and exited 0. That is the workspace's signature
+    // failure — this is the very lens that once reported GREEN while every inspection
+    // 403'd. `inspect.mjs` was hardened against it (classifyInspectionBatch); this sibling
+    // was not. A lens that could not look must never be indistinguishable from a lens that
+    // looked and saw nothing.
+    const ROW_LIMIT = 500;
+    let sa = null;
+    let saError = null;
+    try {
+      const r = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(prop.siteUrl)}/searchAnalytics/query`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ startDate: start, endDate: end, dimensions: ["page"], rowLimit: ROW_LIMIT }),
+      });
+      if (!r.ok) saError = `HTTP ${r.status} ${(await r.text().catch(() => "")).slice(0, 160)}`;
+      else sa = await r.json();
+    } catch (e) {
+      saError = `network: ${e.message}`;
+    }
+
+    if (saError) {
+      findings.push(`${origin}: Search Analytics query FAILED (${saError}) — this lens did NOT run for this property. Nothing was checked; do not read this run as a clean bill.`);
+      continue;
+    }
 
     const pages = (sa.rows || []).map((r) => r.keys[0]);
+
+    // Truncation must be REPORTED, never silent: at exactly the cap we cannot tell a site
+    // with 500 ranking pages from one with 5,000, and the unseen remainder is where the
+    // dead URLs would be.
+    if (pages.length >= ROW_LIMIT) {
+      findings.push(`${origin}: Search Analytics returned the full ${ROW_LIMIT}-row cap — the ranking-page list is TRUNCATED and pages beyond the cap were not checked.`);
+    }
     const broken = [];
     let i = 0;
     await Promise.all(Array.from({ length: 8 }, async () => {

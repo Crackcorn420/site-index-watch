@@ -53,6 +53,10 @@
 import { createHash, createSign } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// Severity rulings live in their own pure, fixture-tested module (89 assertions, four
+// mutation tests). Kept OUT of this file on purpose: this one does network I/O, so a
+// classifier living here could only ever be proven against the live Google API.
+import { classifyCoverage, summarise } from "./classify-coverage.mjs";
 
 const RUN_ID = new Date().toISOString();
 
@@ -308,9 +312,37 @@ export function formatIndexRow(r) {
 
 // ── stateless sampling: no disk, so no cursor. A fixed hash bucket per URL means list
 // growth never reshuffles another URL's bucket; full coverage returns every K runs. ──
+//
+// ⚠ COVERAGE DEAD ZONE — FIXED 2026-08-06. The slot used to be
+//     Math.floor(Date.now() / BUCKET_MS) % K      with BUCKET_MS = 3.5 days
+// while the cron runs WEEKLY (render.yaml: "17 0 * * 1"). 7 days is exactly 2 × 3.5, so
+// the slot advanced by **+2 every run**. Whenever K is EVEN, +2 mod K visits only the
+// even-numbered buckets and the odd half is NEVER inspected — not "later", never — while
+// line ~431 reports "full coverage returns roughly every K run(s)".
+//
+// Simulated against the real sha1 bucketing, 60 consecutive weekly runs:
+//     n=144  K=3 (odd)  → 144/144 = 100%      ← smallclaims today, safe by luck
+//     n=212  K=4        →  98/212 =  46.2%    ← 54% never inspected, ever
+//     n=400  K=7 (odd)  → 400/400 = 100%
+//     n=421  K=8        → 197/421 =  46.8%
+//
+// smallclaims sits at 144 URLs. At 181 URLs K becomes 4 and coverage silently halves,
+// with the report still claiming full coverage — a green-while-broken trap armed by
+// nothing more than publishing pages.
+//
+// The fix advances the slot by exactly ONE per week, so consecutive runs walk
+// 0,1,2,…,K-1 and every bucket is reached in K weeks regardless of K's parity. Extra
+// manual runs inside the same week simply re-inspect that week's slot, which is
+// harmless and idempotent. Exported for the selftest.
+export const SLOT_MS = 7 * 86_400_000; // one slot per week, matching the cron's cadence
+
+export function slotFor(urlCount, now = Date.now(), sampleBase = SAMPLE_BASE) {
+  const K = Math.max(1, Math.ceil(urlCount / sampleBase));
+  return { K, slot: Math.floor(now / SLOT_MS) % K };
+}
+
 function selectSample(urls) {
-  const K = Math.max(1, Math.ceil(urls.length / SAMPLE_BASE));
-  const slot = Math.floor(Date.now() / BUCKET_MS) % K;
+  const { K, slot } = slotFor(urls.length);
   const selected = urls.filter((u) => {
     const h = createHash("sha1").update(u).digest("hex").slice(0, 8);
     return parseInt(h, 16) % K === slot;
@@ -457,14 +489,64 @@ async function main() {
           // puller's regression comparison read a 403 as "Google dropped this page".
           // DEFECT 3 fix — coverageState + lastCrawlTime travel with every row so the
           // puller's findings are triageable without a fresh investigation.
-          for (const r of [...cls.indexedRows, ...cls.notIndexedRows])
+          // ── SEVERITY, not just a count (2026-08-06) ────────────────────────────────
+          // The owner opened Search Console, saw "57 not indexed" and asked whether
+          // anything was watching. This lens had run 3 days earlier and said GREEN, and
+          // both were true — it counts, and a COUNT IS NOT A DEFECT COUNT. Of his 57, 54
+          // were correct behaviour (historical redirects, a font file, pages queued for
+          // first crawl) and exactly one was real. Reporting the number without the
+          // ruling is what made him the detector.
+          //
+          // The classifier needs the LIVE result as evidence: it may only downgrade a
+          // scary Google state to BENIGN when the live check REBUTS it. So hand it the
+          // live-lens row for the same URL; where we have none it returns ACTIONABLE
+          // rather than assuming the page was fine.
+          const liveByUrl = new Map(live.map((r) => [r.declared, r]));
+          const sitemapSet = new Set(urls);
+          const rulings = [];
+
+          for (const r of [...cls.indexedRows, ...cls.notIndexedRows]) {
+            const lr = liveByUrl.get(r.url);
+            const ruling = classifyCoverage({
+              url: r.url,
+              coverageState: r.coverageState || "",
+              inSitemap: sitemapSet.has(r.url),
+              lastCrawlTime: r.lastCrawlTime || null,
+              // A redirect LOOP resolves to no page at all, so pass the 3xx through
+              // rather than a status that would read as a healthy landing.
+              live: lr ? { finalStatus: lr.status, hops: lr.hops } : null,
+            });
+            rulings.push(ruling);
             urlResults.push({
               url: r.url,
               indexed: r.indexed,
               verdict: r.verdict,
               coverageState: r.coverageState || "",
               lastCrawlTime: r.lastCrawlTime || "",
+              severity: ruling.severity,
+              code: ruling.code,
+              reason: ruling.reason,
             });
+          }
+
+          const sum = summarise(rulings);
+          entry.coverage = { ...sum.counts, actionable: sum.actionable, worst: sum.worst };
+          // THE RECONCILIATION LINE — the thing that would have prevented 2026-08-06.
+          // It states the surface it measured and makes our verdict and the Search
+          // Console screen the same conversation.
+          entry.reconciliation = `${sum.line} — measured over ${urls.length} sitemap URL(s), of which ${cls.inspected} inspected this run`;
+
+          const red = rulings.filter((x) => x.severity === "ACTIONABLE_RED");
+          const yellow = rulings.filter((x) => x.severity === "ACTIONABLE_YELLOW");
+          const describe = (list) =>
+            list.slice(0, 5).map((x, i) => `${x.code}: ${x.reason}`).join("\n      ");
+          if (red.length) note("RED", origin, `${red.length} URL(s) need fixing NOW:\n      ${describe(red)}`);
+          if (yellow.length) note("YELLOW", origin, `${yellow.length} URL(s) need attention:\n      ${describe(yellow)}`);
+          // Silence is EARNED, not assumed: say what was ruled benign and why the count
+          // in Search Console will still look alarming.
+          if (!red.length && !yellow.length && sum.notIndexed) {
+            note("GREEN", origin, `${sum.notIndexed} URL(s) are not indexed and NONE are actionable — ${sum.counts.BENIGN} explained-benign, ${sum.counts.NOISE} not-a-page. Search Console will still show them; that is expected.`);
+          }
         }
       }
       if (!inspectionUnavailable) sitesSucceeded++;
