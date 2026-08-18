@@ -84,6 +84,29 @@ sev("redirect NOT in sitemap = BENIGN (correct historical redirect)",
   { url: PAGE, coverageState: "Page with redirect", inSitemap: false, live: { finalStatus: 200, hops: 1 } },
   SEVERITY.BENIGN, "REDIRECT_HISTORICAL");
 
+// ── 3b · The STALE redirect verdict — the 2026-08-18 contradiction ───────────────────
+// Google's crawl predates our URL-shape fix, so it still reports "page with redirect"
+// while our live lens follows ZERO hops. `gsc-watch.mjs` already rebutted this on
+// 2026-08-04 and reported GREEN; this classifier reported RED about the SAME four URLs in
+// the SAME report, and the RED is what reached the owner. Both directions are tested: the
+// rebuttal must work, and it must NOT work without a positive measurement.
+sev("stale redirect verdict + live follows ZERO hops = BENIGN (wait for re-crawl)",
+  { url: PAGE, coverageState: "Page with redirect", inSitemap: true, live: { finalStatus: 200, hops: 0 }, lastCrawlTime: daysAgo(12) },
+  SEVERITY.BENIGN, "REDIRECT_STALE_VERDICT");
+// THE CRITICAL NEGATIVES: no positive measurement means no rebuttal.
+sev("redirect + live check DID NOT RUN = still RED (rule 3: no verdict without evidence)",
+  { url: PAGE, coverageState: "Page with redirect", inSitemap: true, live: null, lastCrawlTime: daysAgo(12) },
+  SEVERITY.ACTIONABLE_RED, "REDIRECT_IN_SITEMAP");
+sev("redirect + live ran but reported no hop count = still RED (undefined is not zero)",
+  { url: PAGE, coverageState: "Page with redirect", inSitemap: true, live: { finalStatus: 200 }, lastCrawlTime: daysAgo(12) },
+  SEVERITY.ACTIONABLE_RED, "REDIRECT_IN_SITEMAP");
+sev("redirect + zero hops but the URL is DEAD = still RED (a 404 rebuts nothing)",
+  { url: PAGE, coverageState: "Page with redirect", inSitemap: true, live: { finalStatus: 404, hops: 0 }, lastCrawlTime: daysAgo(12) },
+  SEVERITY.ACTIONABLE_RED, "REDIRECT_IN_SITEMAP");
+sev("redirect + zero hops but OUR probe failed (status 0) = still RED, never calm",
+  { url: PAGE, coverageState: "Page with redirect", inSitemap: true, live: { finalStatus: 0, hops: 0 }, lastCrawlTime: daysAgo(12) },
+  SEVERITY.ACTIONABLE_RED, "REDIRECT_IN_SITEMAP");
+
 // ── 4 · "Discovered - currently not indexed" — queue vs failure ──────────────────────
 sev("discovered recently = BENIGN (waiting is correct)",
   { url: PAGE, coverageState: "Discovered - currently not indexed", inSitemap: true, firstSeenAt: daysAgo(10) },

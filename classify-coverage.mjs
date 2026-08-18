@@ -222,6 +222,21 @@ export function classifyCoverage(row) {
   // ── "Page with redirect" — the 2026-07-27 incident lives here. ─────────────────────
   if (state.includes("redirect")) {
     if (inSitemap) {
+      // THE SECOND LENS, ported 2026-08-18. `gsc-watch.mjs:classifyNotIndexedFinding` learned
+      // on 2026-08-04 that a redirect verdict Google crawled BEFORE our URL-shape fix is
+      // REBUTTED by a live check that finds no redirect now, and it reported GREEN "none
+      // actionable" for exactly these URLs. This classifier never learned it, so the SAME
+      // report carried that GREEN and a RED "4 URL(s) need fixing NOW" about the same four
+      // URLs — and the RED is what woke the owner. One lens fixed is not the failure class
+      // fixed; design rule 3 was already written here and simply not applied to this branch.
+      //
+      // Conservative by construction: only a POSITIVE per-URL measurement of ZERO hops to a
+      // 2xx rebuts. `live` null, `hops` undefined, or a non-2xx landing leaves this RED —
+      // an unknown must never manufacture calm.
+      if (outcome === "OK" && live && live.hops === 0) {
+        return out(SEVERITY.BENIGN, "REDIRECT_STALE_VERDICT",
+          `Google says "page with redirect" (${ageNote}) but our live check follows ZERO hops to a ${live.finalStatus} — the verdict PREDATES our fix. Wait for the re-crawl; re-fixing this would be fixing a redirect that no longer exists`);
+      }
       return out(SEVERITY.ACTIONABLE_RED, "REDIRECT_IN_SITEMAP",
         "our sitemap declares a URL that REDIRECTS — Google indexes the target instead and DISCARDS every hreflang pointing here (this is the 2026-07-27 regression)");
     }
