@@ -259,6 +259,27 @@ export function classifyCoverage(row) {
       `found by Google, not yet crawled${knownDays !== null ? ` (${knownDays}d)` : ""} — waiting is the correct state; nothing to fix`);
   }
 
+  // ── "URL is unknown to Google" — one step EARLIER than "Discovered": Google has never
+  // found this URL at all (not crawled, not indexed; lastCrawlTime is null). Same class as
+  // the Discovered queue above, same three-way treatment, just an earlier rung on the same
+  // ladder. ⚠ STRICT EQUALITY, not `.includes()`. Every other branch in this file substring-
+  // matches, but `"url is unknown to google"` is a PREFIX of real near-miss states such as
+  // "URL is unknown to Googlebot-News" — `.includes()` here would swallow a different,
+  // unrelated verdict into this one. Match the whole normalised string.
+  if (state === "url is unknown to google") {
+    const knownDays = firstSeenAt ? Math.floor((now - Date.parse(firstSeenAt)) / 86_400_000) : null;
+    if (knownDays !== null && knownDays >= DISCOVERED_GRACE_DAYS) {
+      return out(SEVERITY.ACTIONABLE_YELLOW, "AWAITING_DISCOVERY_STALLED",
+        `known to us for ${knownDays}d and Google still has not discovered it at all — past the ${DISCOVERED_GRACE_DAYS}d grace this is a crawl-budget or internal-linking failure, not a queue`);
+    }
+    if (outcome === "DEAD") {
+      return out(SEVERITY.ACTIONABLE_RED, "AWAITING_DISCOVERY_DEAD",
+        `Google has not discovered this URL yet and it already answers ${live.finalStatus} — it will be discovered into an error`);
+    }
+    return out(SEVERITY.BENIGN, "AWAITING_DISCOVERY",
+      `${inSitemap ? "declared in our sitemap but " : ""}Google has not discovered it yet ("URL is unknown to Google") — nothing is fixable until Google fetches the sitemap; WAIT. If it persists after the sitemap has been re-fetched, check the sitemap is submitted in Search Console.`);
+  }
+
   // ── "Crawled - currently not indexed" — Google read it and said no. ────────────────
   // This is the one that hid a real defect inside the owner's 57. It is never benign for
   // a real page: Google spent the crawl and declined, which is a judgement about the page.

@@ -127,6 +127,34 @@ sev("discovered but the URL is dead = RED (Google will crawl into an error)",
   { url: PAGE, coverageState: "Discovered - currently not indexed", inSitemap: true, live: DEAD404, firstSeenAt: daysAgo(5) },
   SEVERITY.ACTIONABLE_RED, "DISCOVERED_DEAD");
 
+// ── 4b · "URL is unknown to Google" — one step EARLIER than Discovered ───────────────
+sev("unknown to Google, recently seen = BENIGN (awaiting first discovery)",
+  { url: PAGE, coverageState: "URL is unknown to Google", inSitemap: true, firstSeenAt: daysAgo(10) },
+  SEVERITY.BENIGN, "AWAITING_DISCOVERY");
+sev("unknown to Google with no first-seen date = BENIGN (cannot claim it is stalled)",
+  { url: PAGE, coverageState: "URL is unknown to Google", inSitemap: true, firstSeenAt: null },
+  SEVERITY.BENIGN, "AWAITING_DISCOVERY");
+sev(`unknown to Google ${DISCOVERED_GRACE_DAYS}+ days = YELLOW (a queue that never moves is a failure)`,
+  { url: PAGE, coverageState: "URL is unknown to Google", inSitemap: true, firstSeenAt: daysAgo(DISCOVERED_GRACE_DAYS + 1) },
+  SEVERITY.ACTIONABLE_YELLOW, "AWAITING_DISCOVERY_STALLED");
+sev("unknown to Google but the URL is dead = RED (Google will discover it into an error)",
+  { url: PAGE, coverageState: "URL is unknown to Google", inSitemap: true, live: DEAD404, firstSeenAt: daysAgo(5) },
+  SEVERITY.ACTIONABLE_RED, "AWAITING_DISCOVERY_DEAD");
+sev("case-insensitive: Google localises/re-cases this string too",
+  { url: PAGE, coverageState: "URL IS UNKNOWN TO GOOGLE", inSitemap: false },
+  SEVERITY.BENIGN, "AWAITING_DISCOVERY");
+// An asset Google has never found falls through to the asset block's default — still NOISE.
+sev("asset: unknown to Google is NOISE, not a page-discovery defect",
+  { url: "https://example.com/fonts/x.woff2", coverageState: "URL is unknown to Google" },
+  SEVERITY.NOISE, "ASSET");
+// THE CRITICAL NEGATIVES: near-miss strings must NOT match — strict equality, not a substring.
+sev("near-miss 'Googlebot-News' must NOT match — falls through to UNKNOWN_STATE",
+  { url: PAGE, coverageState: "URL is unknown to Googlebot-News" },
+  SEVERITY.ACTIONABLE_YELLOW, "UNKNOWN_STATE");
+sev("an unrelated brand-new state still falls through to UNKNOWN_STATE",
+  { url: PAGE, coverageState: "Some brand new state" },
+  SEVERITY.ACTIONABLE_YELLOW, "UNKNOWN_STATE");
+
 // ── 5 · "Crawled - currently not indexed" — the defect hidden in the owner's 57 ──────
 sev("THE 2026-08-06 FINDING: real page crawled and declined = ACTIONABLE",
   { url: "https://smallclaims.com.hk/blog/travel-agency-refund-guide", coverageState: "Crawled - currently not indexed",
